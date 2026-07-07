@@ -15,7 +15,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-st.title("🚚 Stamford Smart Router")
+st.title("🚚 Stamford Smart Router (Bulit-proof Ver)")
 st.write("PDF-ஐ அப்لوட் செய்து, குறிப்பிட்ட ரேடியஸில் உள்ள மற்ற டிரைவர்கள் மற்றும் பஃபேக்களை உடனே கண்டறியுங்கள்.")
 
 @st.cache_data(show_spinner=False)
@@ -34,6 +34,7 @@ def get_onemap_data(postal_code):
 
 def calculate_distance(lat1, lon1, lat2, lon2):
     R = 6371.0
+    dlat = math.radians(lat2 - math.radians(lat1)) # Correcting variable name issue just in case
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
     a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
@@ -46,37 +47,44 @@ if uploaded_file is not None:
     extracted_jobs = []
     
     with pdfplumber.open(uploaded_file) as pdf:
-        for page in pdf.pages:
-            tables = page.extract_tables()
-            for table in tables:
-                for row in table:
-                    # Stamford PDF-ல் குறைந்தது 5 அல்லது அதற்கு மேற்பட்ட காலம்கள் இருக்கும்
-                    if len(row) >= 5:
-                        sn = str(row[0]).strip() if row[0] else ""
-                        order_no = str(row[1]).strip() if row[1] else ""
-                        pax = str(row[2]).strip() if row[2] else ""
-                        address = str(row[3]).strip() if row[3] else ""
-                        time_info = str(row[4]).strip() if row[4] else ""
+        for page_num, page in enumerate(pdf.pages, 1):
+            text = page.extract_text()
+            if not text:
+                continue
+                
+            # வரிகளாகப் பிரிக்கிறது
+            lines = text.split('\n')
+            for line in lines:
+                # 6 இலக்க எண்ணை மட்டும் தேடுகிறது (முன்னாடி பின்னாடி எழுத்துக்கள் இருந்தாலும் கண்டுபிடிக்கும்)
+                postal_match = re.search(r'(?<!\d)\d{6}(?!\d)', line)
+                if postal_match:
+                    postal = postal_match.group(0)
+                    
+                    # Stamford / Select Catering ஆர்டர் நம்பரைத் தேடுகிறது (ST... அல்லது SC...)
+                    order_match = re.search(r'\b(ST|SC)\d{4,8}[-\d]*\b', line, re.IGNORECASE)
+                    order_no = order_match.group(0) if order_match else f"JOB-{postal}"
+                    
+                    # வரிகளின் ஆரம்பத்தில் இருக்கும் S/N நம்பரை எடுக்கிறது
+                    sn_match = re.match(r'^\s*"?(\d+)\b', line)
+                    sn = sn_match.group(1) if sn_match else "-"
+                    
+                    # தேவையில்லாத கம்பெனி போஸ்டல் கோடை (758099) தவிர்க்கிறது
+                    if postal == "758099":
+                        continue
                         
-                        # அட்ரஸ் காலமில் 6 இலக்க சிங்கப்பூர் போஸ்டல் கோடைத் தேடுகிறது
-                        postal_match = re.search(r'\b\d{6}\b', address)
-                        if postal_match:
-                            postal = postal_match.group(0)
-                            
-                            # தேவையற்ற ஹெடர்களைத் தவிர்க்கிறது
-                            if sn.lower() != "s/n" and order_no != "":
-                                extracted_jobs.append({
-                                    "SN": sn,
-                                    "OrderNo": order_no,
-                                    "Pax": pax,
-                                    "Address": address.replace('\n', ' '),
-                                    "Time": time_info.replace('\n', ' '),
-                                    "Postal": postal
-                                })
-                                    
+                    # கிளீன் செய்யப்பட்ட வரி விவரம்
+                    clean_line = line.replace('"', '').replace(',', ' ').strip()
+                    
+                    extracted_jobs.append({
+                        "SN": sn,
+                        "OrderNo": order_no.upper(),
+                        "Address": clean_line,
+                        "Postal": postal
+                    })
+                    
     if extracted_jobs:
         df = pd.DataFrame(extracted_jobs).drop_duplicates(subset=['OrderNo', 'Postal'])
-        st.success(f"PDF வெற்றிகரமாகப் படிக்கப்பட்டது! மொத்தம் {len(df)} ஆர்டர்கள் கண்டறியப்பட்டன.")
+        st.success(f"🎉 PDF சல்லடை போட்டு படிக்கப்பட்டது! மொத்தம் {len(df)} பஃபே ஆர்டர்கள் வெற்றிகரமாகக் கண்டறியப்பட்டன.")
         
         st.subheader("🔍 உங்கள் தற்போதைய லொகேஷனை உள்ளிடவும்")
         search_input = st.text_input("உங்களுடைய அட்ரஸ் அல்லது 6-இலக்க போஸ்டல் கோடு (Current Location):", placeholder="எ.கா: 730768")
@@ -114,15 +122,14 @@ if uploaded_file is not None:
                         st.subheader("🗺️ அருகில் உள்ள பஃபேக்களின் வரைபடம் (Map View)")
                         st.map(pd.DataFrame(map_data)[['lat', 'lon']])
                         
-                    st.subheader(f"📋 வித்தின் {radius_km} KM ரேடியஸிற்குள் இருக்கும் ஆன்-கோயிங் பஃபேக்கள்:")
+                    st.subheader(f"📋 வித்தின் {radius_km} KM ரேடியஸிற்குள் இருக்கும் பஃபேக்கள்:")
                     if nearby_list:
                         sorted_list = sorted(nearby_list, key=lambda x: x['Distance'])
                         for job in sorted_list:
                             st.markdown(f'''
                             <div class="driver-card">
                                 <h4>📦 S/N: {job['SN']} | ஆர்டர்: {job['OrderNo']} ({job['Distance']} KM அருகில்)</h4>
-                                <p><b>📍 முகவரி:</b> {job['Address']}</p>
-                                <p><b>🕒 வருகை/கலெக்ஷன் நேரம்:</b> {job['Time']} | 👥 <b>Pax:</b> {job['Pax']}</p>
+                                <p><b>📍 முழு விவரம்:</b> {job['Address']}</p>
                             </div>
                             ''', unsafe_allow_html=True)
                             
@@ -131,7 +138,7 @@ if uploaded_file is not None:
                                 gmaps_url = f"https://www.google.com/maps/search/?api=1&query={job['Lat']},{job['Lng']}"
                                 st.markdown(f'<a href="{gmaps_url}" target="_blank"><button style="width:100%; background-color:#4CAF50; color:white; border:none; padding:10px; border-radius:5px; font-weight:bold; cursor:pointer;">🗺️ GOOGLE MAP ROUTE</button></a>', unsafe_allow_html=True)
                             with col2:
-                                msg = f"மச்சான், நான் உன் பக்கத்துல {job['Distance']} KM-ல தான் இருக்கேன். S/N: {job['SN']} | {job['OrderNo']} - {job['Address']} பஃபேக்கு உதவி வேணுமா?"
+                                msg = f"மச்சான், நான் உன் பக்கத்துல {job['Distance']} KM-ல தான் இருக்கேன். S/N: {job['SN']} | {job['OrderNo']} பஃபேக்கு உதவி வேணுமா?"
                                 whatsapp_url = f"https://wa.me/?text={urllib.parse.quote(msg)}"
                                 st.markdown(f'<a href="{whatsapp_url}" target="_blank"><button style="width:100%; background-color:#25D366; color:white; border:none; padding:10px; border-radius:5px; font-weight:bold; cursor:pointer;">💬 WHATSAPP</button></a>', unsafe_allow_html=True)
                             st.write("---")
@@ -140,4 +147,4 @@ if uploaded_file is not None:
                 else:
                     st.error("முகவரியைக் கண்டறிய முடியவில்லை. தயவுசெய்து சரியான போஸ்டல் கோடை உள்ளிடவும்.")
     else:
-        st.warning("PDF-லிருந்து போஸ்டல் கோடுகளைப் பிரித்தெடுக்க முடியவில்லை. டேபிள் ஃபார்மட்டைச் சரிபார்க்கவும்.")
+        st.warning("PDF-லிருந்து போஸ்டல் கோடுகளைப் பிரித்தெடுக்க முடியவில்லை. ஃபைல் ஃபார்மட்டைச் சரிபார்க்கவும்.")
