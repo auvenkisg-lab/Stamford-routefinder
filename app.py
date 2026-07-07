@@ -1,10 +1,21 @@
 import streamlit as st
-import pdfplumber
 import requests
 import pandas as pd
 import math
 import re
 import urllib.parse
+from io import BytesIO
+
+# pypdf-ஐ முயற்சி செய்கிறோம், இல்லை என்றால் pypdf2
+try:
+    import pypdf
+    PDF_READER = "pypdf"
+except ImportError:
+    try:
+        import PyPDF2 as pypdf
+        PDF_READER = "pypdf2"
+    except ImportError:
+        PDF_READER = "none"
 
 st.set_page_config(page_title="Stamford Smart Router", layout="wide")
 
@@ -16,7 +27,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 st.title("🚚 Stamford Smart Router")
-st.write("PDF-ஐ அப்லோட் செய்து, 10 கிமீ ரேடியஸில் உள்ள மற்ற டிரைவர்கள் மற்றும் ஆன்-கோயிங் பஃபேக்களை உடனே கண்டறியுங்கள்.")
+st.write("PDF-ஐ அப்لوட் செய்து, 10 கிமீ ரேடியஸில் உள்ள மற்ற டிரைவர்கள் மற்றும் ஆன்-கோயிங் பஃபேக்களை உடனே கண்டறியுங்கள்.")
 
 @st.cache_data(show_spinner=False)
 def get_onemap_data(postal_code):
@@ -43,35 +54,47 @@ def calculate_distance(lat1, lon1, lat2, lon2):
 uploaded_file = st.file_uploader("📂 உங்கள் தினசரி PDF கோப்பை (Daily Services Schedule) இங்கே அப்லோட் செய்யவும்:", type=["pdf"])
 
 if uploaded_file is not None:
-    st.success("PDF வெற்றிகரமாகப் படிக்கப்பட்டது!")
     extracted_jobs = []
     
-    with pdfplumber.open(uploaded_file) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            if text:
-                lines = text.split('\n')
-                for line in lines:
-                    postal_match = re.search(r'\b\d{6}\b', line)
-                    if postal_match:
-                        postal = postal_match.group(0)
-                        order_match = re.search(r'ST\d{4}-\d{5}', line)
-                        order_no = order_match.group(0) if order_match else "ST-ORDER"
-                        
-                        geo = get_onemap_data(postal)
-                        if geo:
-                            extracted_jobs.append({
-                                "SN": "Log",
-                                "OrderNo": order_no,
-                                "Pax": "Check PDF",
-                                "Address": geo['address'],
-                                "Time": "Scheduled",
-                                "Latitude": geo['lat'],
-                                "Longitude": geo['lng']
-                            })
-                                    
+    try:
+        # pypdf மூலம் PDF படிக்கப்படுகிறது
+        pdf_file = BytesIO(uploaded_file.read())
+        if PDF_READER == "pypdf":
+            reader = pypdf.PdfReader(pdf_file)
+            num_pages = len(reader.pages)
+            for i in range(num_pages):
+                text = reader.pages[i].extract_text()
+                if text:
+                    for line in text.split('\n'):
+                        postal_match = re.search(r'\b\d{6}\b', line)
+                        if postal_match:
+                            postal = postal_match.group(0)
+                            order_match = re.search(r'ST\d{4}-\d{5}', line)
+                            order_no = order_match.group(0) if order_match else "ST-ORDER"
+                            extracted_jobs.append({"Postal": postal, "OrderNo": order_no, "Line": line})
+        else:
+            st.error("சர்வரில் PDF ரீடர் டூல் இல்லை. தயவுசெய்து ஆப்பை ரீபூட் செய்யவும்.")
+    except Exception as e:
+        st.error(f"PDF படிப்பதில் சிக்கல்: {e}")
+
+    final_jobs = []
     if extracted_jobs:
-        df = pd.DataFrame(extracted_jobs).drop_duplicates(subset=['OrderNo', 'Address'])
+        st.success("PDF வெற்றிகரமாகப் படிக்கப்பட்டது!")
+        for job in extracted_jobs:
+            geo = get_onemap_data(job['Postal'])
+            if geo:
+                final_jobs.append({
+                    "SN": "Log",
+                    "OrderNo": job['OrderNo'],
+                    "Pax": "Check PDF",
+                    "Address": geo['address'],
+                    "Time": "Scheduled",
+                    "Latitude": geo['lat'],
+                    "Longitude": geo['lng']
+                })
+
+    if final_jobs:
+        df = pd.DataFrame(final_jobs).drop_duplicates(subset=['OrderNo', 'Address'])
         st.subheader("🔍 உங்கள் தற்போதைய லொகேஷனை உள்ளிடவும்")
         search_input = st.text_input("உங்களுடைய அட்ரஸ் அல்லது 6-இலக்க போஸ்டல் கோடு (Current Location):", placeholder="எ.கா: 730768")
         radius_km = st.slider("தேட வேண்டிய தூர ரேடியஸ் (KM):", min_value=1, max_value=20, value=10)
@@ -117,7 +140,7 @@ if uploaded_file is not None:
                         
                         col1, col2 = st.columns(2)
                         with col1:
-                            gmaps_url = f"https://www.google.com/maps/search/?api=1&query={job['Latitude']},{job['Longitude']}"
+                            gmaps_url = f"http://maps.google.com/?q={job['Latitude']},{job['Longitude']}"
                             st.markdown(f'<a href="{gmaps_url}" target="_blank"><button style="width:100%; background-color:#4CAF50; color:white; border:none; padding:10px; border-radius:5px; font-weight:bold; cursor:pointer;">🗺️ GOOGLE MAP ROUTE</button></a>', unsafe_allow_html=True)
                         with col2:
                             msg = f"மச்சான், நான் உன் பக்கத்துல {job['Distance']} KM-ல தான் இருக்கேன். {job['OrderNo']} - {job['Address']} பஃபேக்கு உதவி வேணுமா?"
